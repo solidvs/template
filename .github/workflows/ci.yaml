@@ -1,0 +1,160 @@
+name: ci
+
+# Build pipeline of a system (stack proposal, section 5): every pull request and every change to
+# main is checked; main also publishes the two images of the release (application and migration
+# step, ADR-0016) to the registry, identified by their digests. Deploy is a separate pull request
+# in <organization>/platform that points at those digests.
+#
+# The installation's database engine is the repository variable DATABASE_ENGINE (postgresql by
+# default; sqlserver where the organization runs SQL Server). The database job tests both.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          # Writes a user npmrc that reads NODE_AUTH_TOKEN for the platform packages.
+          registry-url: https://npm.pkg.github.com
+          scope: '@solidvs'
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      # ADR-0011, item 10: no third-party design-system package, client or name in code or lockfile.
+      - name: No third-party design-system residue
+        run: |
+          if git grep -n -i -E 'atlaskit|atlassian|@compiled/|statsig|--ds-' -- . ':!.github/workflows/ci.yaml'; then
+            echo "Third-party design-system residue found (ADR-0011)"; exit 1
+          fi
+      - name: Dependency audit (runtime dependencies)
+        run: pnpm audit --prod --audit-level high
+      # ADR-0016: the model is engine-neutral, the SQL Server schema is derived from it, and every
+      # change of the model has its migrations for both engines.
+      - name: Data model and migrations in sync
+        run: pnpm --filter @example/api db:check
+      - run: pnpm lint
+      - run: pnpm build
+      - run: pnpm typecheck
+      - run: pnpm test
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: No secret in the history
+        run: >
+          docker run --rm -v "$PWD:/repo" -w /repo
+          ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+          git --redact --no-banner /repo
+
+  # ADR-0016: migrations applied to a fresh database of each engine with the migration login, the
+  # result compared with the model, synthetic seed, and the system over HTTP with the application
+  # login. The database is a laboratory container provisioned like a real one (solidvs-data lab).
+  database:
+    runs-on: ubuntu-latest
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [postgresql, sqlserver]
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      DATABASE_ENGINE: ${{ matrix.engine }}
+      CHECKPOINT_DISABLE: '1'
+      # SQL Server Developer edition, for tests only: the repository owner accepts its licence.
+      LAB_MSSQL_ACCEPT_EULA: 'Y'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          registry-url: https://npm.pkg.github.com
+          scope: '@solidvs'
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - name: Build the API and the packages it depends on
+        run: pnpm --filter "@example/api..." build
+      - name: Laboratory database (${{ matrix.engine }})
+        run: pnpm --filter @example/api db:lab
+      - name: Migrations, with the migration login
+        run: pnpm --filter @example/api db:deploy
+      - name: The database matches the model
+        run: pnpm --filter @example/api db:drift
+      - name: Synthetic seed, twice (idempotent)
+        run: pnpm --filter @example/api db:seed && pnpm --filter @example/api db:seed
+      - name: The system against the database, with the application login
+        run: pnpm --filter @example/api test:db
+      - name: Remove the laboratory database
+        if: always()
+        run: pnpm --filter @example/api db:lab:down
+
+  image:
+    runs-on: ubuntu-latest
+    needs: [check, secret-scan, database]
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}
+      MIGRATE_IMAGE: ghcr.io/${{ github.repository }}/migrate
+      DATABASE_ENGINE: ${{ vars.DATABASE_ENGINE || 'postgresql' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the application and migration images for ${{ env.DATABASE_ENGINE }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for target in app migrate; do
+            name="$IMAGE"; [ "$target" = migrate ] && name="$MIGRATE_IMAGE"
+            docker build --target "$target" --build-arg "DATABASE_ENGINE=$DATABASE_ENGINE" \
+              --secret id=npm_token,env=NODE_AUTH_TOKEN --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+              -t "$name:$GITHUB_SHA" .
+          done
+      - name: Vulnerability scan (fixable high and critical fail the build)
+        run: |
+          for name in "$IMAGE" "$MIGRATE_IMAGE"; do
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+              ghcr.io/aquasecurity/trivy:0.76.2@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb \
+              image --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed --no-progress "$name:$GITHUB_SHA"
+          done
+      - name: Publish by digest
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker push "$IMAGE:$GITHUB_SHA"
+          docker push "$MIGRATE_IMAGE:$GITHUB_SHA"
+          app="$(docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE:$GITHUB_SHA")"
+          migrate="$(docker inspect --format '{{index .RepoDigests 0}}' "$MIGRATE_IMAGE:$GITHUB_SHA")"
+          {
+            echo "### Images published ($DATABASE_ENGINE)"
+            echo
+            echo "- application: \`$app\`"
+            echo "- migration step: \`$migrate\`"
+            echo
+            echo "Deploy to staging: pull request in ${{ github.repository_owner }}/platform setting these digests in"
+            echo "\`environments/staging/<system>.compose.yaml\`."
+          } >> "$GITHUB_STEP_SUMMARY"

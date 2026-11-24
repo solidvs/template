@@ -1,0 +1,13 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+.DS_Store
+# Local configuration with secrets: never versioned (the platform delivers it in production)
+config.local.json
+config.*.local.json
+# Laboratory database state (solidvs-data lab) and the generated Prisma client (built from the schema)
+.lab/
+apps/api/src/generated/
+.env
+.env.*

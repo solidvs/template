@@ -1,0 +1,2 @@
+# Written by solidvs-data. Migrations of this folder are for postgresql only.
+provider = "postgresql"

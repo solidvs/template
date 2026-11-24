@@ -1,0 +1,15 @@
+# Catalog manifest: how this system appears in the IT portal. One per repository; review it in the
+# same pull request as any change that makes it untrue.
+apiVersion: solidvs/catalog/v1
+kind: System
+metadata:
+  id: example                    # same id as the platform files and GitHub environments
+  name: Sistema de exemplo        # name shown to people
+  description: Replace with one sentence on what the system does and for whom.
+spec:
+  type: web                      # web | api | integration | job
+  lifecycle: development         # development | production | deprecated
+  owner: ti                      # team that answers for the system
+  surfaces: [internal]           # internal, plus public when external users exist
+  stack: standard                # standard: created from solidvs/template
+  dependsOn: []                  # catalog ids, e.g. [sqlserver-maindb, identity]

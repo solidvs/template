@@ -1,0 +1,2 @@
+# Written by solidvs-data. Migrations of this folder are for sqlserver only.
+provider = "mssql"

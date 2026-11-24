@@ -1,0 +1,14 @@
+{
+  "PUBLIC_URL": "http://localhost:5173",
+  "OIDC_ISSUER": "http://localhost:8081/realms/internal",
+  "OIDC_CLIENT_ID": "example",
+  "OIDC_CLIENT_SECRET": "<from the identity provider; never commit>",
+  "OIDC_ALLOW_INSECURE_ISSUER": "true",
+  "LOG_LEVEL": "info",
+  "DATABASE_HOST": "localhost",
+  "DATABASE_PORT": "55432",
+  "DATABASE_NAME": "example_dev",
+  "DATABASE_USER": "example_dev_app",
+  "DATABASE_PASSWORD": "<from the provisioning procedure; never commit>",
+  "DATABASE_TLS_CA": "<PEM of the server certificate's authority, when it is not a public one>"
+}

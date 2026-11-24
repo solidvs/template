@@ -1,0 +1,11 @@
+{
+  "name": "@example/migrate",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Dependencies of the migration image (ADR-0016): the Prisma CLI and the platform's data entry point. The schema and migrations come from apps/api/prisma at build time.",
+  "dependencies": {
+    "@solidvs/server": "0.5.0",
+    "prisma": "7.10.1"
+  }
+}
